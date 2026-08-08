@@ -107,7 +107,14 @@ export class BoardsService {
 
     if (!project) throw new ProjectNotFoundException();
 
-    // Her board'a yeni position'ını ata — transaction garantisi
+    const validBoardCount = await this.prisma.board.count({
+      where: { id: { in: dto.boardIds }, projectId },
+    });
+
+    if (validBoardCount !== dto.boardIds.length) {
+      throw new BoardNotFoundException();
+    }
+
     await this.prisma.$transaction(
       dto.boardIds.map((boardId, index) =>
         this.prisma.board.update({
