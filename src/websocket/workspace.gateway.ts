@@ -7,6 +7,7 @@ import {
   OnGatewayConnection,
   OnGatewayDisconnect,
   OnGatewayInit,
+  WsException,
 } from '@nestjs/websockets';
 import { UseGuards, Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -14,6 +15,7 @@ import { ConfigService } from '@nestjs/config';
 import { Server, Socket } from 'socket.io';
 import { WsAuthGuard } from './ws-auth.guard';
 import type { AuthenticatedSocket } from './authenticated-socket.type';
+import { PrismaService } from '../prisma/prisma.service';
 
 interface JwtPayload {
   sub: string;
@@ -41,6 +43,7 @@ export class WorkspaceGateway
   constructor(
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
+    private readonly prisma: PrismaService,
   ) {}
 
   afterInit(server: Server) {
@@ -75,10 +78,32 @@ export class WorkspaceGateway
 
   @UseGuards(WsAuthGuard)
   @SubscribeMessage('workspace:join')
-  handleJoinWorkspace(
+  async handleJoinWorkspace(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: { workspaceId: string },
   ) {
+    // KRİTİK GÜVENLİK KONTROLÜ: JWT'nin geçerli olması, kullanıcının BU
+    // workspace'e üye olduğu anlamına gelmez. Bu kontrol olmadan, giriş
+    // yapmış herhangi bir kullanıcı başka bir workspace'in ID'sini tahmin
+    // edip o workspace'in tüm real-time olaylarını (task içerikleri,
+    // yorumlar) dinleyebilirdi — REST tarafındaki TenantGuard'ın WebSocket
+    // karşılığı burada.
+    const membership = await this.prisma.workspaceMember.findUnique({
+      where: {
+        workspaceId_userId: {
+          workspaceId: data.workspaceId,
+          userId: client.data.user.id,
+        },
+      },
+    });
+
+    if (!membership) {
+      this.logger.warn(
+        `Yetkisiz workspace:join denemesi — user=${client.data.user.id} workspace=${data.workspaceId}`,
+      );
+      throw new WsException('Bu workspace için yetkiniz yok');
+    }
+
     void client.join(workspaceRoom(data.workspaceId));
     this.logger.log(
       `Kullanıcı ${client.data.user.id} workspace:${data.workspaceId} odasına katıldı`,
