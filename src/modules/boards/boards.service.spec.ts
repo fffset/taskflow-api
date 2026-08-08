@@ -161,6 +161,10 @@ describe('BoardsService', () => {
   describe('reorder', () => {
     it('board sırası güncellenebilmeli', async () => {
       mockPrisma.project.findFirst.mockResolvedValue(mockProject);
+      // IDOR fix'i eklenince: verilen boardIds'in gerçekten bu project'e
+      // ait olduğunu doğrulamak için board.count() çağrılıyor. Test
+      // senaryosunda 2 geçerli ID gönderildiği için count de 2 dönmeli.
+      mockPrisma.board.count.mockResolvedValue(2);
       mockPrisma.$transaction.mockResolvedValue([]);
       mockPrisma.board.findMany.mockResolvedValue([mockBoard]);
 
@@ -171,8 +175,34 @@ describe('BoardsService', () => {
         { boardIds: ['board_1', 'board_2'] },
       );
 
+      expect(mockPrisma.board.count).toHaveBeenCalledWith({
+        where: { id: { in: ['board_1', 'board_2'] }, projectId: 'project_1' },
+      });
       expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1);
       expect(result).toBeDefined();
+    });
+
+    it("geçersiz/yabancı board ID'si varsa reddedilmeli (IDOR koruması)", async () => {
+      mockPrisma.project.findFirst.mockResolvedValue(mockProject);
+      // 2 ID gönderildi ama sadece 1'i gerçekten bu project'e ait —
+      // count 1 dönüyor, 2 bekleniyor, bu yüzden hata fırlatılmalı.
+      mockPrisma.board.count.mockResolvedValue(1);
+
+      await expect(
+        service.reorder('ws_1', 'project_1', mockMember(WorkspaceRole.OWNER), {
+          boardIds: ['board_1', 'yabanci_board_id'],
+        }),
+      ).rejects.toThrow(BoardNotFoundException);
+
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('MEMBER board sıralayamamalı', async () => {
+      await expect(
+        service.reorder('ws_1', 'project_1', mockMember(WorkspaceRole.MEMBER), {
+          boardIds: ['board_1', 'board_2'],
+        }),
+      ).rejects.toThrow(BoardForbiddenException);
     });
   });
 
