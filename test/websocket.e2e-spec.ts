@@ -138,6 +138,32 @@ describe('WebSocket E2E', () => {
     });
   });
 
+  it('üye olunmayan workspace odasına katılamamalı (IDOR koruması)', (done) => {
+    clientSocket = io(`http://localhost:${PORT}`, {
+      auth: { token: accessToken },
+      reconnection: false,
+    });
+
+    const fakeWorkspaceId = 'cnonexistent00000000000000';
+
+    clientSocket.on('connect', () => {
+      clientSocket.emit('workspace:join', { workspaceId: fakeWorkspaceId });
+    });
+
+    clientSocket.on('workspace:joined', () => {
+      done(new Error('Üye olunmayan workspace odasına katılmamalıydı'));
+    });
+
+    clientSocket.on('exception', (err: { message: string }) => {
+      expect(err.message).toContain('yetkiniz yok');
+      done();
+    });
+
+    clientSocket.on('connect_error', (err) => {
+      done(new Error(`Bağlantı hatası: ${err.message}`));
+    });
+  }, 10000);
+
   it("task oluşunca aynı workspace odasındaki client'a anlık bildirilmeli", (done) => {
     clientSocket = io(`http://localhost:${PORT}`, {
       auth: { token: accessToken },

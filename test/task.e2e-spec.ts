@@ -181,6 +181,21 @@ describe('Tasks E2E', () => {
     });
   });
 
+  describe('PATCH /boards/:boardId/tasks/reorder — IDOR koruması', () => {
+    it("başka workspace'e ait task ID'si ile reorder reddedilmeli", async () => {
+      // Bu workspace'e ait GERÇEK bir task (setup'ta oluşturulan taskId
+      // kullanılabilir), ama ikinci ID tamamen uydurma/başka bir workspace'e
+      // ait olabilir.
+      await request(app.getHttpServer())
+        .patch(
+          `/api/v1/workspaces/${workspaceId}/boards/${boardId}/tasks/reorder`,
+        )
+        .set('Cookie', cookies)
+        .send({ taskIds: [taskId, 'cnonexistent00000000000000'] })
+        .expect(404);
+    });
+  });
+
   describe('GET /workspaces/:id/tasks/search', () => {
     it('full-text search çalışmalı', async () => {
       const res = await request(app.getHttpServer())

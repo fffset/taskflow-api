@@ -154,6 +154,18 @@ describe('Boards E2E', () => {
     });
   });
 
+  describe('PATCH /projects/:projectId/boards/reorder — IDOR koruması', () => {
+    it("başka workspace'e ait board ID'si ile reorder reddedilmeli", async () => {
+      await request(app.getHttpServer())
+        .patch(
+          `/api/v1/workspaces/${workspaceId}/projects/${projectId}/boards/reorder`,
+        )
+        .set('Cookie', cookies)
+        .send({ boardIds: [boardId, 'cnonexistent00000000000000'] })
+        .expect(404);
+    });
+  });
+
   describe('DELETE /workspaces/:wId/projects/:pId/boards/:boardId', () => {
     it('board silinebilmeli', async () => {
       await request(app.getHttpServer())
