@@ -1,0 +1,11 @@
+model Label {
+  id        String @id @default(cuid())
+  projectId String
+  name      String
+  color     String @default("#6B7280")
+
+  project Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tasks   TaskLabel[]
+
+  @@map("labels")
+}

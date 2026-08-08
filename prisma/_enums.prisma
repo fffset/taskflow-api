@@ -1,0 +1,34 @@
+enum WorkspaceRole {
+  OWNER
+  ADMIN
+  MANAGER
+  MEMBER
+}
+
+enum TaskPriority {
+  NONE
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum NotificationType {
+  TASK_ASSIGNED
+  TASK_COMMENT
+  TASK_STATUS_CHANGED
+  TASK_DUE_SOON
+  WORKSPACE_INVITE
+  MENTION
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  LOGIN
+  LOGOUT
+  INVITE_SENT
+  INVITE_ACCEPTED
+  ROLE_CHANGED
+}

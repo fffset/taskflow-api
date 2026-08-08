@@ -1,0 +1,35 @@
+model Project {
+  id          String   @id @default(cuid())
+  workspaceId String
+  name        String
+  description String?
+  position    Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  status    ProjectStatus @relation(fields: [statusId], references: [id])
+  statusId  String
+  boards    Board[]
+  labels    Label[]
+
+  @@index([workspaceId])
+  @@map("projects")
+}
+
+model ProjectStatus {
+  id          String   @id @default(cuid())
+  workspaceId String
+  name        String
+  color       String   @default("#6B7280")
+  position    Int      @default(0)
+  isSystem    Boolean  @default(false)  // true = silinemez (Active, Archived, Done)
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  projects  Project[]
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId])
+  @@map("project_statuses")
+}

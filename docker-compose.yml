@@ -1,0 +1,53 @@
+version: '3.9'
+ 
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: taskflow_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-taskflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-taskflow_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-taskflow_db}
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - taskflow_network
+ 
+  redis:
+    image: redis:7-alpine
+    container_name: taskflow_redis
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    networks:
+      - taskflow_network
+ 
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: taskflow_rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-taskflow}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-taskflow_pass}
+    ports:
+      - '5672:5672'
+      - '15672:15672'   # Management UI
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - taskflow_network
+ 
+volumes:
+  postgres_data:
+  redis_data:
+  rabbitmq_data:
+ 
+networks:
+  taskflow_network:
+    driver: bridge
+ 

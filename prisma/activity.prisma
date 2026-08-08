@@ -1,0 +1,17 @@
+model ActivityLog {
+  id          String   @id @default(cuid())
+  workspaceId String
+  userId      String
+  taskId      String?
+  action      String
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id])
+  task      Task?     @relation(fields: [taskId], references: [id])
+
+  @@index([workspaceId])
+  @@index([createdAt])
+  @@map("activity_logs")
+}

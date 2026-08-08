@@ -1,0 +1,20 @@
+model AuditLog {
+  id          String      @id @default(cuid())
+  workspaceId String
+  userId      String
+  action      AuditAction
+  entity      String
+  entityId    String
+  before      Json?
+  after       Json?
+  ipAddress   String?
+  userAgent   String?
+  createdAt   DateTime    @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id])
+
+  @@index([workspaceId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}

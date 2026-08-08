@@ -1,0 +1,65 @@
+model Task {
+  id          String       @id @default(cuid())
+  workspaceId String
+  boardId     String
+  title       String
+  description String?
+  priority    TaskPriority @default(NONE)
+  position    Int          @default(0)
+  dueDate     DateTime?
+  assigneeId  String?
+  creatorId   String
+  parentId    String?
+  statusId    String
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  searchVector Unsupported("tsvector")?
+  embedding    Unsupported("vector(1536)")?
+
+  board    Board      @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  status   TaskStatus @relation(fields: [statusId], references: [id])
+  assignee User?      @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  creator  User       @relation("TaskCreator", fields: [creatorId], references: [id])
+  parent   Task?      @relation("SubTasks", fields: [parentId], references: [id])
+  subTasks Task[]     @relation("SubTasks")
+
+  comments     Comment[]
+  labels       TaskLabel[]
+  activityLogs ActivityLog[]
+
+  @@index([workspaceId])
+  @@index([boardId])
+  @@index([statusId])
+  @@index([assigneeId])
+  @@index([searchVector], type: Gin)
+  @@map("tasks")
+}
+
+model TaskStatus {
+  id          String   @id @default(cuid())
+  workspaceId String
+  name        String
+  color       String   @default("#6B7280")
+  position    Int      @default(0)
+  isSystem    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  tasks     Task[]
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId])
+  @@map("task_statuses")
+}
+
+model TaskLabel {
+  taskId  String
+  labelId String
+
+  task  Task  @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  label Label @relation(fields: [labelId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, labelId])
+  @@map("task_labels")
+}
