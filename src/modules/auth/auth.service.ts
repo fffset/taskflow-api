@@ -1,3 +1,7 @@
+// auth.service.ts dosyasının TAMAMI — refreshTokens() ve ilgili private
+// helper'lar güncellendi. Diğer metodlar (register, login, loginWith2fa,
+// logout, enable2fa, verify2fa, getMe, toAuthResponse) DEĞİŞMEDİ.
+
 import { Injectable } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
@@ -119,7 +123,22 @@ export class AuthService {
       where: { token: oldRefreshToken },
     });
 
-    if (!tokenRecord || tokenRecord.userId !== userId) {
+    // REUSE DETECTION: Bu noktaya gelene kadar oldRefreshToken'ın JWT
+    // imzası zaten doğrulanmış oluyor (userId parametresi, imza
+    // doğrulamasından geçmiş bir JWT payload'ından geliyor — bkz.
+    // RefreshTokenStrategy). Yani token'ın DB'de kaydı yoksa, bu rastgele
+    // bir saldırı denemesi değil — GEÇERLİ ama DAHA ÖNCE KULLANILMIŞ
+    // (silinmiş) bir token'ın tekrar kullanılmaya çalışıldığı anlamına
+    // gelir. Bu, klasik "refresh token replay" saldırısının imzasıdır
+    // (örn. token çalınmış ve hem saldırgan hem gerçek kullanıcı aynı
+    // token'ı kullanmaya çalışıyor). Bu durumda kullanıcının TÜM
+    // cihazlardaki oturumlarını iptal ediyoruz — güvenli taraf.
+    if (!tokenRecord) {
+      await this.prisma.refreshToken.deleteMany({ where: { userId } });
+      throw new TokenInvalidException();
+    }
+
+    if (tokenRecord.userId !== userId) {
       throw new TokenInvalidException();
     }
 
@@ -130,15 +149,32 @@ export class AuthService {
       throw new TokenInvalidException();
     }
 
-    await this.prisma.refreshToken.delete({
-      where: { token: oldRefreshToken },
-    });
-
     const user = await this.prisma.user.findUniqueOrThrow({
       where: { id: userId },
     });
 
-    return this.generateTokens(user.id, user.email);
+    // RACE CONDITION DÜZELTMESİ: eski token'ı silme + yeni token
+    // üretme/kaydetme işlemi artık tek bir transaction içinde, atomik.
+    // Aynı token'la eşzamanlı iki istek gelirse, PostgreSQL'in row-level
+    // kilitleme mekanizması sayesinde ikinci istek birincinin commit'ini
+    // bekler; birinci commit olduğunda token zaten silinmiş olacağından
+    // ikinci istek yukarıdaki !tokenRecord kontrolüne düşer ve reuse
+    // detection tetiklenir. Bu, "iki eşzamanlı refresh" durumunda ikisinin
+    // de sessizce başarılı olup iki farklı token çifti üretmesini engeller.
+    return this.prisma.$transaction(async (tx) => {
+      await tx.refreshToken.delete({ where: { token: oldRefreshToken } });
+
+      const tokens = await this.signTokenPair(user.id, user.email);
+
+      const expiresAt = new Date();
+      expiresAt.setDate(expiresAt.getDate() + 7);
+
+      await tx.refreshToken.create({
+        data: { token: tokens.refreshToken, userId: user.id, expiresAt },
+      });
+
+      return tokens;
+    });
   }
 
   // ─── 2FA Enable ────────────────────────────────────────────────────────────
@@ -197,7 +233,11 @@ export class AuthService {
 
   // ─── Private Helpers ───────────────────────────────────────────────────────
 
-  private async generateTokens(
+  // Sadece JWT çiftini imzalar — DB'ye HİÇBİR ŞEY yazmaz. Bu ayrım,
+  // refreshTokens()'ın transaction içinde (tx client ile) token
+  // üretebilmesini sağlıyor, generateTokens()'ın kendi içindeki
+  // this.prisma çağrısı transaction dışında kalmasın diye.
+  private async signTokenPair(
     userId: string,
     email: string,
   ): Promise<AuthTokens> {
@@ -227,14 +267,26 @@ export class AuthService {
       }),
     ]);
 
+    return { accessToken, refreshToken };
+  }
+
+  // login/loginWith2fa akışlarında kullanılır — imzalama + DB'ye kaydetme
+  // birlikte, transaction'a ihtiyaç yok çünkü öncesinde silinecek bir
+  // token yok (ilk giriş).
+  private async generateTokens(
+    userId: string,
+    email: string,
+  ): Promise<AuthTokens> {
+    const tokens = await this.signTokenPair(userId, email);
+
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + 7);
 
     await this.prisma.refreshToken.create({
-      data: { token: refreshToken, userId, expiresAt },
+      data: { token: tokens.refreshToken, userId, expiresAt },
     });
 
-    return { accessToken, refreshToken };
+    return tokens;
   }
 
   private toAuthResponse(user: {
