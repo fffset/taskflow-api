@@ -8,6 +8,7 @@ import request from 'supertest';
 import cookieParser from 'cookie-parser';
 import { AppModule } from '../src/app.module';
 import { PrismaService } from '../src/prisma/prisma.service';
+import helmet from 'helmet';
 
 describe('Auth E2E', () => {
   let app: INestApplication;
@@ -19,6 +20,7 @@ describe('Auth E2E', () => {
     }).compile();
 
     app = moduleFixture.createNestApplication();
+    app.use(helmet());
     app.use(cookieParser());
     app.setGlobalPrefix('api');
     app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
@@ -124,6 +126,26 @@ describe('Auth E2E', () => {
         .post('/api/v1/auth/login')
         .send({ email: 'e2e@test.com', password: 'wrong' })
         .expect(401);
+    });
+  });
+
+  describe('Security Headers (Helmet)', () => {
+    it("temel güvenlik header'ları response'ta olmalı", async () => {
+      const res = await request(app.getHttpServer()).get('/api/v1');
+
+      // Helmet'in varsayılan olarak eklediği header'lardan birkaçını
+      // kontrol ediyoruz — hepsini değil, en kritik olanları. Bu test,
+      // birisi ileride main.ts'ten `app.use(helmet())` satırını yanlışlıkla
+      // silerse (ya da bir refactor sırasında kaybolursa) hemen fark
+      // edilmesini sağlıyor.
+      expect(res.headers['x-content-type-options']).toBe('nosniff');
+      expect(res.headers['x-dns-prefetch-control']).toBeDefined();
+      expect(res.headers['x-frame-options']).toBeDefined();
+
+      // Helmet varsayılan olarak bu header'ı KALDIRIR (bilgi sızıntısını
+      // önlemek için) — Express'in kendini "Express" olarak tanıtan
+      // X-Powered-By header'ı olmamalı.
+      expect(res.headers['x-powered-by']).toBeUndefined();
     });
   });
 });
