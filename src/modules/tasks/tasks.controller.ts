@@ -132,7 +132,7 @@ export class TasksController {
   }
 
   @Patch('boards/:boardId/tasks/reorder')
-  @ApiOperation({ summary: 'Task sırasını güncelle' })
+  @ApiOperation({ summary: "Task'ları sırala" })
   reorder(
     @Param('workspaceId') workspaceId: string,
     @Param('boardId') boardId: string,

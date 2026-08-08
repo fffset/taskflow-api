@@ -386,6 +386,14 @@ export class TasksService {
 
     if (!board) throw new BoardNotFoundException();
 
+    const validTaskCount = await this.prisma.task.count({
+      where: { id: { in: dto.taskIds }, boardId },
+    });
+
+    if (validTaskCount !== dto.taskIds.length) {
+      throw new TaskNotFoundException();
+    }
+
     await this.prisma.$transaction(
       dto.taskIds.map((taskId, index) =>
         this.prisma.task.update({
@@ -398,7 +406,10 @@ export class TasksService {
     return this.prisma.task.findMany({
       where: { boardId },
       orderBy: { position: 'asc' },
-      include: { status: true },
+      include: {
+        status: true,
+        assignee: { select: { id: true, name: true, avatarUrl: true } },
+      },
     });
   }
 
