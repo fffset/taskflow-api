@@ -9,6 +9,7 @@ import {
   WorkspaceForbiddenException,
   WorkspaceInviteInvalidException,
   WorkspaceInviteExpiredException,
+  WorkspaceNotFoundException,
 } from './exceptions/workspace.exceptions';
 import { EmailPublisherService } from 'src/queue/email-publisher.service';
 
@@ -246,6 +247,82 @@ describe('WorkspacesService', () => {
           email: 'invite@test.com',
           role: WorkspaceRole.MEMBER,
         }),
+      ).rejects.toThrow(WorkspaceForbiddenException);
+    });
+  });
+
+  describe('updateMemberRole', () => {
+    it('OWNER rolündeki hedef üye rolden indirilemez (Broken Access Control fix)', async () => {
+      mockPrisma.workspaceMember.findUnique.mockResolvedValue({
+        id: 'member_2',
+        workspaceId: 'ws_1',
+        userId: 'owner_user_id',
+        role: WorkspaceRole.OWNER,
+        joinedAt: new Date(),
+      });
+
+      await expect(
+        service.updateMemberRole(
+          'ws_1',
+          mockMember(WorkspaceRole.ADMIN),
+          'owner_user_id',
+          { role: WorkspaceRole.MEMBER },
+        ),
+      ).rejects.toThrow(WorkspaceForbiddenException);
+
+      // Kritik: update() metodunun HİÇ ÇAĞRILMADIĞINI doğruluyoruz —
+      // sadece exception fırlatmak yetmez, gerçekten DB'ye yazma
+      // işleminin engellenmiş olması lazım.
+      expect(mockPrisma.workspaceMember.update).not.toHaveBeenCalled();
+    });
+
+    it('ADMIN, MEMBER rolündeki bir üyeyi rol değiştirebilir (normal akış bozulmamalı)', async () => {
+      mockPrisma.workspaceMember.findUnique.mockResolvedValue({
+        id: 'member_3',
+        workspaceId: 'ws_1',
+        userId: 'regular_user_id',
+        role: WorkspaceRole.MEMBER,
+        joinedAt: new Date(),
+      });
+      mockPrisma.workspaceMember.update.mockResolvedValue({
+        id: 'member_3',
+        workspaceId: 'ws_1',
+        userId: 'regular_user_id',
+        role: WorkspaceRole.MANAGER,
+        joinedAt: new Date(),
+      });
+
+      const result = await service.updateMemberRole(
+        'ws_1',
+        mockMember(WorkspaceRole.ADMIN),
+        'regular_user_id',
+        { role: WorkspaceRole.MANAGER },
+      );
+
+      expect(result.role).toBe(WorkspaceRole.MANAGER);
+    });
+
+    it('hedef üye bulunamazsa 404', async () => {
+      mockPrisma.workspaceMember.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.updateMemberRole(
+          'ws_1',
+          mockMember(WorkspaceRole.ADMIN),
+          'nonexistent_user',
+          { role: WorkspaceRole.MEMBER },
+        ),
+      ).rejects.toThrow(WorkspaceNotFoundException);
+    });
+
+    it('MEMBER rolündeki biri rol değiştiremez', async () => {
+      await expect(
+        service.updateMemberRole(
+          'ws_1',
+          mockMember(WorkspaceRole.MEMBER),
+          'some_user_id',
+          { role: WorkspaceRole.ADMIN },
+        ),
       ).rejects.toThrow(WorkspaceForbiddenException);
     });
   });
