@@ -221,6 +221,57 @@ describe('Tasks E2E', () => {
         .expect(404);
     });
   });
+
+  describe('GET /tasks/search — sanitization', () => {
+    it('özel tsquery karakterleri 500 hatası vermemeli', async () => {
+      // Parantez, &, |, ! gibi PostgreSQL tsquery operatör karakterleri
+      // sanitize edilmeden gönderilirse to_tsquery syntax error fırlatıp
+      // 500 dönerdi. Artık bu karakterler temizleniyor.
+      const res = await request(app.getHttpServer())
+        .get(`/api/v1/workspaces/${workspaceId}/tasks/search`)
+        .query({ q: '((((' })
+        .set('Cookie', cookies)
+        .expect(200);
+
+      expect(Array.isArray(res.body)).toBe(true);
+    });
+
+    it('& | ! karakterleri içeren sorgu 500 vermemeli', async () => {
+      const res = await request(app.getHttpServer())
+        .get(`/api/v1/workspaces/${workspaceId}/tasks/search`)
+        .query({ q: 'test & | !' })
+        .set('Cookie', cookies)
+        .expect(200);
+
+      expect(Array.isArray(res.body)).toBe(true);
+    });
+
+    it('sanitize sonrası anlamlı arama hâlâ çalışmalı', async () => {
+      // Not: bu noktada 'DELETE' bloğu 'E2E Task'ı zaten silmiş oluyor —
+      // bu yüzden kendi, benzersiz başlıklı yeni bir task oluşturup
+      // onu arıyoruz.
+      await request(app.getHttpServer())
+        .post(`/api/v1/workspaces/${workspaceId}/boards/${boardId}/tasks`)
+        .set('Cookie', cookies)
+        .send({
+          title: 'SanitizationSearchTestUnique',
+          statusId: todoStatusId,
+        });
+
+      const res = await request(app.getHttpServer())
+        .get(`/api/v1/workspaces/${workspaceId}/tasks/search`)
+        .query({ q: 'SanitizationSearchTestUnique' })
+        .set('Cookie', cookies)
+        .expect(200);
+
+      expect(res.body.length).toBeGreaterThanOrEqual(1);
+      expect(
+        (res.body as Array<{ title: string }>).some(
+          (t) => t.title === 'SanitizationSearchTestUnique',
+        ),
+      ).toBe(true);
+    });
+  });
 });
 
 async function cleanDb(prisma: PrismaService) {
