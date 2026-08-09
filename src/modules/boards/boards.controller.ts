@@ -11,11 +11,13 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
-import type { WorkspaceMember } from '@prisma/client';
+import { WorkspaceRole, type WorkspaceMember } from '@prisma/client';
 import { BoardsService } from './boards.service';
 import { CreateBoardDto, UpdateBoardDto, ReorderBoardsDto } from './dto';
 import { TenantGuard } from '../../common/guards/tenant.guard';
 import { CurrentMember } from '../../common/decorators/current-member.decorator';
+import { Roles } from 'src/common/decorators/roles.decorator';
+import { RolesGuard } from 'src/common/guards/roles.guard';
 
 @ApiTags('boards')
 @ApiBearerAuth()
@@ -25,6 +27,8 @@ export class BoardsController {
   constructor(private readonly boardsService: BoardsService) {}
 
   @Post()
+  @UseGuards(RolesGuard)
+  @Roles(WorkspaceRole.OWNER, WorkspaceRole.ADMIN, WorkspaceRole.MANAGER)
   @ApiOperation({ summary: 'Board oluştur' })
   create(
     @Param('workspaceId') workspaceId: string,
