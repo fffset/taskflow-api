@@ -6,7 +6,7 @@ Enterprise-grade, multi-tenant project and task management REST API.
 
 ## Tech Stack
 
-NestJS · TypeScript · Prisma 6 · PostgreSQL + pgvector · Redis · RabbitMQ · WebSocket (Socket.io) · JWT · Docker · AWS · Grafana Cloud + Loki · Claude API
+NestJS · TypeScript · Prisma 6 · PostgreSQL + pgvector · Redis · RabbitMQ · WebSocket (Socket.io) · JWT · Helmet · Docker · AWS · Grafana Cloud + Loki · Claude API
 
 ---
 
@@ -28,11 +28,13 @@ PG     Redis            ↓      Gateway
                     Grafana Cloud
 ```
 
-**Multi-tenancy:** Shared DB, Shared Schema — her tabloda `workspaceId`. `TenantGuard` her request'te workspace üyeliğini kontrol eder, `request.workspaceMember`'a yazar. Controller'lar `@CurrentMember()` ile okur.
+**Multi-tenancy:** Shared DB, Shared Schema — her tabloda `workspaceId`. `TenantGuard` her request'te workspace üyeliğini kontrol eder, `request.workspaceMember`'a yazar. Controller'lar `@CurrentMember()` ile okur. Bu izolasyon **REST** tarafında geçerli — WebSocket tarafında ayrı bir üyelik kontrolü var (aşağıda "WebSocket — Connection ve Room Authorization" bölümüne bakın).
 
 **Producer/Consumer (Worker) Mimarisi:** Ana API (`src/main.ts`) ve worker (`src/worker/main.ts`) aynı repo içinde ama **tamamen ayrı process** olarak çalışır — biri HTTP sunucusu, diğeri RabbitMQ `worker.queue`'sunu dinleyen bağımsız bir NestJS microservice. Ana API, `EmailPublisherService.emit()` ile "fire and forget" mesajlar atar; worker bu mesajları `@EventPattern` handler'larıyla işler. Tek bir kuyruk üzerinden birden fazla iş türü (email, ileride reminder/batch) desteklenecek şekilde genelleştirildi.
 
-**Real-time (WebSocket):** `WorkspaceGateway`, Socket.io tabanlı bir gateway — kullanıcılar bir workspace'e bağlanınca `workspace:{id}` odasına (room) katılır. Bağlantı, handshake aşamasında bir middleware (`server.use()`) ile JWT doğrulanır — geçersiz/eksik token varsa bağlantının kendisi (henüz `connect` event'i client'a ulaşmadan) reddedilir. Task/comment servisleri, bir işlem tamamlanınca `emitTaskCreated`/`emitTaskUpdated`/`emitCommentAdded` gibi metotlarla aynı odadaki diğer bağlı kullanıcılara anlık olay yayınlar.
+**Real-time (WebSocket):** `WorkspaceGateway`, Socket.io tabanlı bir gateway — kullanıcılar bir workspace'e bağlanınca `workspace:{id}` odasına (room) katılır. İki katmanlı yetkilendirme var: (1) bağlantı kurulurken bir middleware JWT'yi doğrular, (2) bir odaya katılma isteğinde ayrıca o workspace'e gerçekten üye olunduğu doğrulanır. Task/comment servisleri, bir işlem tamamlanınca `emitTaskCreated`/`emitTaskUpdated`/`emitCommentAdded` gibi metotlarla aynı odadaki diğer bağlı kullanıcılara anlık olay yayınlar.
+
+**Güvenlik Header'ları:** `helmet()` middleware'i tüm response'lara `Content-Security-Policy`, `X-Frame-Options`, `Strict-Transport-Security`, `X-Content-Type-Options` gibi header'ları otomatik ekler; `X-Powered-By` header'ını kaldırır (sunucunun Express olduğu bilgisini gizler).
 
 ---
 
@@ -53,16 +55,22 @@ User
                           └── AuditLog
 
 Task
-  ├── searchVector  (tsvector — full-text search)
+  ├── searchVector  (tsvector — full-text search, sanitize edilmiş girdi)
   └── embedding     (vector(1536) — RAG/pgvector)
 
 Notification
   └── readAt  (nullable timestamp — null ise okunmamış, dolu ise okunma zamanı)
+
+RefreshToken
+  └── tek kullanımlık (rotation) — kullanılan token silinir, tekrar kullanılırsa
+      "reuse detection" tetiklenir (bkz. Notlar)
 ```
 
 **Workspace Rolleri:** `OWNER` · `ADMIN` · `MANAGER` · `MEMBER`
 
 **Status Sistemi:** Enum yerine tablo — her workspace kendi project ve task status setini özelleştirebilir. `isSystem=true` olanlar silinemez.
+
+**Rol Kısıtlaması Deseni:** Yapısal/organizasyonel işlemler (board oluşturma, board sıralama, proje oluşturma) `OWNER`/`ADMIN`/`MANAGER` ile sınırlı; günlük iş öğeleri (task oluşturma, task güncelleme, task sıralama) her workspace üyesine (`MEMBER` dahil) açık. Bu ayrım tüm modüllerde tutarlı uygulanıyor.
 
 **Yorum & Mention Sistemi:** Yorumlar `@[isim](userId)` formatında gömülü mention içerebilir (Slack/Notion tarzı). `mention-parser.ts` bunları ayrıştırır; sadece workspace'e gerçekten üye olan (ve yorumu yazan kişinin kendisi olmayan) kullanıcılara hem `Notification` (in-app) hem email (worker üzerinden) gönderilir. Ayrıca yorum oluşunca, aynı workspace'i açık tutan tüm bağlı client'lara WebSocket üzerinden anlık bildirilir.
 
@@ -73,13 +81,13 @@ Notification
 - Task atandığında (kendine atama hariç)
 - Workspace davet linki oluştuğunda
 
-Şu an gerçek SMTP entegrasyonu yok — `EmailService` (worker içinde) sadece log basarak simüle ediyor.
+Şu an gerçek SMTP entegrasyonu yok — `EmailService` (worker içinde) sadece log basarak simüle ediyor. Davet email'i loglanırken **token asla log satırına yazılmıyor** — sadece "davet gönderildi" bilgisi loglanıyor (token, bir bearer sırrı olduğu için log dosyasına sızmasını önlemek adına).
 
 **Real-time Bildirimler (WebSocket üzerinden):**
 - Task oluşturulduğunda/güncellendiğinde/silindiğinde (`task:created`/`task:updated`/`task:deleted`)
 - Yorum eklendiğinde (`comment:added`)
 
-**In-app Bildirimler:** `Notification` tablosu şu an sadece mention'larda dolduruluyor (ileride task-assigned, workspace-invite gibi diğer olaylar da eklenebilir). `readAt: DateTime?` alanı tek doğruluk kaynağı — `null` okunmamış, dolu ise okunma zamanı (ayrı bir `isRead: boolean` tutulmuyor, iki alanın senkron kalma riskini önlemek için — `WorkspaceInvite.acceptedAt` ile aynı desen).
+**In-app Bildirimler:** `Notification` tablosu şu an sadece mention'larda dolduruluyor. `readAt: DateTime?` alanı tek doğruluk kaynağı — `null` okunmamış, dolu ise okunma zamanı.
 
 ---
 
@@ -96,12 +104,12 @@ src/
     logger/         → Winston (console + file + daily rotate)
     types/          → TaskflowRequest, AuthenticatedUser
   modules/
-    auth/           → JWT, refresh token, httpOnly cookie, 2FA
+    auth/           → JWT, refresh token (transaction + reuse detection), httpOnly cookie, 2FA
     users/          → profil, şifre değiştir, hesap sil
     workspaces/     → CRUD, davet sistemi (email publish), üye yönetimi, roller, üye arama
     projects/       → CRUD + custom status yönetimi
-    boards/         → CRUD, sıralama, reorder
-    tasks/          → CRUD, atama (email publish), öncelik, deadline, sub-task, move, reorder, custom status, aktivite akışı, WS broadcast
+    boards/         → CRUD, sıralama (IDOR korumalı + rol kısıtlı), reorder
+    tasks/          → CRUD, atama (email publish), öncelik, deadline, sub-task, move, reorder (IDOR korumalı), custom status, aktivite akışı, WS broadcast, sanitize edilmiş full-text search
     labels/         → CRUD, task'a etiket ekle/kaldır
     comments/       → CRUD, mention parsing + bildirim + email publish + WS broadcast
     notifications/  → listeleme, okunmamış sayısı, tekli/toplu okundu işaretleme
@@ -114,7 +122,7 @@ src/
   websocket/
     authenticated-socket.type.ts → client.data.user için tip güvenliği
     ws-auth.guard.ts              → mesaj bazlı ekstra doğrulama katmanı
-    workspace.gateway.ts          → asıl gateway; afterInit'te connection-level JWT middleware'i
+    workspace.gateway.ts          → asıl gateway; afterInit'te connection-level JWT middleware'i + workspace:join'de üyelik kontrolü (IDOR fix)
     websocket.module.ts
   worker/
     main.ts                   → BAĞIMSIZ process, HTTP yok, sadece worker.queue dinler
@@ -122,12 +130,12 @@ src/
     email/
       email.module.ts
       email.controller.ts     → @EventPattern handler'ları
-      email.service.ts        → gerçek gönderim burada (şimdilik simüle)
+      email.service.ts        → gerçek gönderim burada (şimdilik simüle, token loglamıyor)
   prisma/
     prisma.service.ts
     prisma.module.ts
   app.module.ts
-  main.ts
+  main.ts                      → helmet() burada uygulanıyor
 
 prisma/
   _config.prisma
@@ -145,18 +153,20 @@ prisma/
   migrations/
 
 test/
-  app.e2e-spec.ts
-  workspace.e2e-spec.ts    → CRUD + cascade delete testi (proje/board/task dolu workspace)
+  app.e2e-spec.ts          → security header testi (Helmet) dahil
+  workspace.e2e-spec.ts    → CRUD + cascade delete testi
   project.e2e-spec.ts
-  board.e2e-spec.ts
-  task.e2e-spec.ts
+  board.e2e-spec.ts        → reorder IDOR + rol kısıtlama regresyon testleri
+  task.e2e-spec.ts         → reorder IDOR + search sanitization regresyon testleri
   label.e2e-spec.ts
-  comment.e2e-spec.ts      → yorum CRUD, mention bildirimi (2 kullanıcılı senaryo), aktivite akışı, yetki kontrolleri
-  websocket.e2e-spec.ts    → connection-level auth (geçersiz token reddi), room join, uçtan uca task broadcast
+  comment.e2e-spec.ts      → yorum CRUD, mention bildirimi, aktivite akışı, yetki kontrolleri
+  websocket.e2e-spec.ts    → connection-level auth + workspace:join IDOR regresyon testi
 
 .husky/
   pre-commit    → npm run lint
   pre-push      → npm test
+
+test-websocket.js  → manuel WS test script'i (env variable ile token alır, hardcode YOK)
 ```
 
 ---
@@ -170,7 +180,7 @@ test/
 | POST | /auth/login | Giriş |
 | POST | /auth/login/2fa | 2FA ile giriş |
 | POST | /auth/logout | Çıkış |
-| POST | /auth/refresh | Token yenile |
+| POST | /auth/refresh | Token yenile (transaction + reuse detection korumalı) |
 | GET | /auth/me | Mevcut kullanıcı |
 | POST | /auth/2fa/enable | 2FA aktifleştir |
 | POST | /auth/2fa/verify | 2FA doğrula |
@@ -191,7 +201,7 @@ test/
 | GET | /workspaces/:id | Workspace detayı |
 | PATCH | /workspaces/:id | Güncelle |
 | DELETE | /workspaces/:id | Sil (OWNER) — ilişkili tüm veri cascade silinir |
-| POST | /workspaces/:id/invite | Üye davet et (davet email'i worker'a publish edilir) |
+| POST | /workspaces/:id/invite | Üye davet et (davet email'i worker'a publish edilir, token loglanmaz) |
 | POST | /workspaces/invite/accept/:token | Daveti kabul et (email doğrulamalı) |
 | GET | /workspaces/:id/invites | Bekleyen davetleri listele |
 | DELETE | /workspaces/:id/invites/:inviteId | Daveti iptal et |
@@ -215,10 +225,10 @@ test/
 ### Boards
 | Method | Endpoint | Açıklama |
 |--------|----------|----------|
-| POST | /workspaces/:wId/projects/:pId/boards | Board oluştur |
+| POST | /workspaces/:wId/projects/:pId/boards | Board oluştur (OWNER/ADMIN/MANAGER) |
 | GET | /workspaces/:wId/projects/:pId/boards | Board listele |
 | PATCH | /workspaces/:wId/projects/:pId/boards/:id | Güncelle |
-| PATCH | /workspaces/:wId/projects/:pId/boards/reorder | Sırala |
+| PATCH | /workspaces/:wId/projects/:pId/boards/reorder | Sırala (OWNER/ADMIN/MANAGER, ID sahiplik doğrulamalı — IDOR korumalı) |
 | DELETE | /workspaces/:wId/projects/:pId/boards/:id | Sil |
 
 ### Tasks
@@ -227,10 +237,10 @@ test/
 | POST | /workspaces/:wId/boards/:bId/tasks | Task oluştur (WS: task:created broadcast) |
 | GET | /workspaces/:wId/boards/:bId/tasks | Task listele |
 | GET | /workspaces/:wId/tasks/:id | Task detayı |
-| GET | /workspaces/:wId/tasks/search?q= | Full-text search |
+| GET | /workspaces/:wId/tasks/search?q= | Full-text search (girdi sanitize edilir) |
 | PATCH | /workspaces/:wId/tasks/:id | Güncelle (assignee değişince email publish, WS: task:updated broadcast) |
 | PATCH | /workspaces/:wId/tasks/:id/move | Board'a taşı |
-| PATCH | /workspaces/:wId/boards/:bId/tasks/reorder | Sırala |
+| PATCH | /workspaces/:wId/boards/:bId/tasks/reorder | Sırala (ID sahiplik doğrulamalı — IDOR korumalı, tüm üyeler kullanabilir) |
 | DELETE | /workspaces/:wId/tasks/:id | Sil (WS: task:deleted broadcast) |
 | GET | /workspaces/:wId/tasks/statuses | Status listele |
 | POST | /workspaces/:wId/tasks/statuses | Status ekle |
@@ -270,9 +280,10 @@ Bağlantı: `io('http://localhost:8000', { auth: { token: accessToken } })`
 
 | Yön | Event | Payload | Açıklama |
 |-----|-------|---------|----------|
-| Client → Server | `workspace:join` | `{ workspaceId }` | Bir workspace odasına katıl |
+| Client → Server | `workspace:join` | `{ workspaceId }` | Bir workspace odasına katıl (üyelik doğrulanır) |
 | Client → Server | `workspace:leave` | `{ workspaceId }` | Workspace odasından ayrıl |
 | Server → Client | `workspace:joined` | `{ workspaceId }` | Katılım onayı |
+| Server → Client | (exception) | `{ status: 'error', message, cause }` | Yetkisiz katılma denemesi reddedildi |
 | Server → Client | `task:created` | `Task` | Yeni task oluştu |
 | Server → Client | `task:updated` | `Task` | Task güncellendi |
 | Server → Client | `task:deleted` | `{ taskId }` | Task silindi |
@@ -289,7 +300,7 @@ Bağlantı: `io('http://localhost:8000', { auth: { token: accessToken } })`
   "message": "Email address is already in use",
   "path": "/api/v1/auth/register",
   "method": "POST",
-  "timestamp": "2026-08-08T..."
+  "timestamp": "2026-08-09T..."
 }
 ```
 
@@ -302,7 +313,7 @@ Bağlantı: `io('http://localhost:8000', { auth: { token: accessToken } })`
 | AUTH_001  | AUTH_INVALID_CREDENTIALS  | Hatalı email/şifre           |
 | AUTH_002  | AUTH_EMAIL_ALREADY_EXISTS | Email zaten kayıtlı          |
 | AUTH_003  | AUTH_TOKEN_EXPIRED        | JWT süresi dolmuş            |
-| AUTH_004  | AUTH_TOKEN_INVALID        | Geçersiz token               |
+| AUTH_004  | AUTH_TOKEN_INVALID        | Geçersiz token (reuse detection dahil) |
 | AUTH_005  | AUTH_NO_REFRESH_TOKEN     | Refresh token yok            |
 | AUTH_006  | AUTH_2FA_REQUIRED         | 2FA kodu gerekli             |
 | AUTH_007  | AUTH_2FA_INVALID_CODE     | Hatalı 2FA kodu              |
@@ -313,9 +324,9 @@ Bağlantı: `io('http://localhost:8000', { auth: { token: accessToken } })`
 | WS_005    | WORKSPACE_INVITE_EXPIRED  | Süresi dolmuş davet          |
 | PRJ_001   | PROJECT_NOT_FOUND         | Proje bulunamadı             |
 | PRJ_002   | PROJECT_FORBIDDEN         | Yetkisiz erişim              |
-| BOARD_001 | BOARD_NOT_FOUND           | Board bulunamadı             |
+| BOARD_001 | BOARD_NOT_FOUND           | Board bulunamadı (IDOR reddi dahil) |
 | BOARD_002 | BOARD_FORBIDDEN           | Yetkisiz erişim              |
-| TASK_001  | TASK_NOT_FOUND            | Task bulunamadı              |
+| TASK_001  | TASK_NOT_FOUND            | Task bulunamadı (IDOR reddi dahil) |
 | TASK_002  | TASK_FORBIDDEN            | Yetkisiz erişim              |
 | LBL_001   | LABEL_NOT_FOUND           | Label bulunamadı             |
 | LBL_002   | LABEL_FORBIDDEN           | Yetkisiz erişim              |
@@ -385,6 +396,12 @@ npm test
 
 # E2E testler (izole test DB, WebSocket testi gerçek bir porta [8901] dinler)
 npm run test:e2e
+
+# Manuel WebSocket testi (token'ı ASLA hardcode etme, env variable kullan)
+TEST_ACCESS_TOKEN='<access_token>' TEST_WORKSPACE_ID='<workspace_id>' node test-websocket.js
+
+# Bağımlılık güvenlik denetimi
+npm audit
 ```
 
 ## Test Environment Setup
@@ -428,65 +445,81 @@ echo "DATABASE_URL=postgresql://taskflow:taskflow_pass@localhost:5432/taskflow_t
 
 ### Workspace Silme — Cascade Sırası
 
-`WorkspacesService.remove()` workspace'i silerken ilişkili tüm veriyi **manuel ve belirli bir sırada** siler (Prisma'nın otomatik cascade'ine güvenilmez, çünkü `Task.status` → `TaskStatus` ve `Project.status` → `ProjectStatus` ilişkilerinde cascade tanımlı değildir — kasıtlı, çünkü tek bir status silinince altındaki task/proje'lerin silinmesi istenmez).
-
-Silme sırası:
+`WorkspacesService.remove()` workspace'i silerken ilişkili tüm veriyi **manuel ve belirli bir sırada** siler. Silme sırası:
 ```
 ActivityLog → Comment → TaskLabel → Task → Label → Board
   → Project → TaskStatus → ProjectStatus
   → AuditLog → WorkspaceInvite → WorkspaceMember → Workspace
 ```
-
-Bu sıra `workspace.e2e-spec.ts` içindeki "proje/board/task içeren workspace tam olarak silinmeli" testiyle regresyona karşı korunur.
+Bu sıra `workspace.e2e-spec.ts` testiyle regresyona karşı korunur.
 
 ### Rate Limiting
 
-`@nest-lab/throttler-storage-redis` ile Redis-backed rate limiting kullanılıyor — birden fazla instance (production'da ECS ile scale edilince) arasında sayaç tutarlılığı sağlanır. Test ortamında (`NODE_ENV=test`) throttler devre dışı bırakılır.
+`@nest-lab/throttler-storage-redis` ile Redis-backed rate limiting. Test ortamında (`NODE_ENV=test`) devre dışı.
 
 ### Audit Log
 
-`AuditInterceptor` global olarak tüm `POST`/`PATCH`/`DELETE` isteklerini otomatik loglar — developer hiçbir ek kod yazmaz. `before` alanı UPDATE/DELETE işlemlerinde DB'den önceden çekilir, `after` alanı response body'sinden alınır.
+`AuditInterceptor` global olarak tüm `POST`/`PATCH`/`DELETE` isteklerini otomatik loglar.
 
 ### Mention Sistemi
 
-Yorumlarda mention, düz `@isim` metni olarak değil, gömülü `@[isim](userId)` formatında yazılır (bkz. `src/modules/comments/mention-parser.ts`). Bu format, kullanıcı adında boşluk/özel karakter olsa bile hangi `userId`'nin kastedildiğini kesin olarak taşır. `handleMentions()` üç güvenlik kontrolü yapar:
-1. Mention edilen `userId` gerçekten bu workspace'in bir üyesi mi (sahte ID'lerle bildirim spam'i engellenir)
-2. Yorumu yazan kişi kendini mention etmişse bildirim oluşturulmaz
-3. Aynı kişi birden fazla kez mention edilirse tek bildirim gider (`Set` ile dedupe)
+Yorumlarda mention, gömülü `@[isim](userId)` formatında yazılır (bkz. `mention-parser.ts`). `handleMentions()` üç güvenlik kontrolü yapar: (1) mention edilen `userId` gerçekten workspace üyesi mi, (2) kendini mention edince bildirim gitmez, (3) aynı kişi birden fazla kez mention edilirse tek bildirim gider.
 
 ### Worker / Producer-Consumer Mimarisi
 
-Ana API ve worker aynı repo içinde ama fiziksel olarak **iki ayrı process**:
-
 ```
-npm run start:dev     → src/main.ts     → HTTP sunucu, :8000
+npm run start:dev     → src/main.ts        → HTTP sunucu, :8000
 npm run start:worker  → src/worker/main.ts → RabbitMQ worker.queue dinleyici, HTTP yok
 ```
 
-Ana API tarafında `EmailPublisherService.emit()` çağrıları "fire and forget" — cevap beklemez, kuyruğa mesaj bırakır. Worker tarafında `@EventPattern(pattern)` decorator'lı handler'lar bu mesajları pattern'e göre yakalayıp işler. Tek bir kuyruk (`worker.queue`) üzerinden birden fazla iş türü yönetildiği için, yeni bir iş türü eklemek yeni bir RabbitMQ altyapısı kurmayı değil, sadece `rabbitmq.constants.ts`'e yeni pattern'ler ve worker içine yeni bir modül eklemeyi gerektirir.
+Biri çökse diğerinin etkilenmediği gerçek bir process izolasyonu — email sunucusu/worker geçici durursa ana API'nin CRUD işlevleri etkilenmez, bildirimler kuyrukta birikip worker geri gelince işlenir.
 
-Bu, biri çökse diğerinin etkilenmediği gerçek bir process izolasyonu sağlar — email sunucusu/worker geçici olarak durursa ana API'nin task/proje/board CRUD işlevleri hiç etkilenmez, sadece email bildirimleri kuyrukta birikir ve worker geri gelince işlenir.
+### WebSocket — Connection ve Room Authorization (İki Katmanlı)
 
-### WebSocket — Connection-Level Authentication
+**1. Connection-level (bağlantı seviyesi):** `WorkspaceGateway.afterInit()` içinde kayıtlı bir `server.use()` middleware'i, handshake tamamlanmadan önce JWT'yi doğrular. Geçersiz/eksik token'la bağlanmaya çalışan bir client, `connect` event'i hiç almadan `connect_error` alır.
 
-`WorkspaceGateway.afterInit()` içinde kayıtlı bir `server.use()` middleware'i, **her bağlantı denemesinde**, handshake tamamlanmadan önce JWT'yi doğrular. Bu, `@UseGuards(WsAuthGuard)` ile mesaj bazlı korumadan farklı — o sadece belirli event handler'ları (`workspace:join` gibi) korur, bağlantının kendisini değil. Middleware sayesinde geçersiz/eksik token'la bağlanmaya çalışan bir client, `connect` event'i hiç almadan `connect_error` alır.
+**2. Room-level (oda seviyesi):** JWT'nin geçerli olması, kullanıcının **o workspace'e üye olduğu** anlamına gelmez — bu ayrı bir kontrol. `handleJoinWorkspace()`, `workspace:join` isteğinde `WorkspaceMember` tablosunda gerçek bir üyelik kaydı arar; yoksa `WsException` fırlatıp katılımı reddeder. Bu ikinci katman olmadan, kimliği doğrulanmış herhangi bir kullanıcı başka bir workspace'in ID'sini tahmin edip o workspace'in tüm real-time olaylarını (task içerikleri, yorumlar) dinleyebilirdi — bu, bir güvenlik denetiminde bulunup kapatılan gerçek bir IDOR açığıydı, `websocket.e2e-spec.ts`'te regresyon testiyle korunuyor.
 
-İki katman birlikte "defense in depth" sağlıyor: middleware ana savunma (bağlantı seviyesi), guard ekstra bir kontrol katmanı (mesaj seviyesi). Bu ayrım `websocket.e2e-spec.ts`'te açıkça test ediliyor — "geçersiz token ile bağlanılamamalı" testi, middleware olmadan (sadece guard varken) başarısız oluyordu çünkü bağlantı önce kuruluyor, sadece mesaj gönderiminde reddediliyordu.
+### Reorder Endpoint'leri — IDOR Koruması
+
+`tasks.reorder()` ve `boards.reorder()`, hedef kaynağın (board/project) doğru workspace'e ait olduğunu doğrulamanın **yeterli olmadığını** varsayar — `dto.taskIds`/`dto.boardIds` dizisindeki **her bir ID'nin** de gerçekten o board'a/project'e ait olduğu ayrıca `count()` ile doğrulanır (`validCount !== dto.ids.length` ise reddedilir). Bu kontrol olmadan, bir kullanıcı kendi erişimi olan bir board'a başka bir workspace'e ait task/board ID'leri vererek onların `position` alanını manipüle edebilirdi. `task.e2e-spec.ts` ve `board.e2e-spec.ts`'te regresyon testleriyle korunuyor.
+
+`boards.reorder()` ayrıca `boards.create()` ile tutarlı olacak şekilde `OWNER`/`ADMIN`/`MANAGER` rol kısıtlaması taşır (board sıralaması, board oluşturma gibi yapısal bir karar); `tasks.reorder()` ise rol kısıtlaması taşımaz (herhangi bir workspace üyesi kendi board'undaki task'ları sıralayabilir, `tasks.create()` ile tutarlı).
+
+### Refresh Token — Race Condition ve Reuse Detection
+
+Eski implementasyonda token silme + yeni token oluşturma iki ayrı (transaction'sız) işlemdi ve token tekrar kullanıldığında (çalıntı senaryosu) hiçbir tespit mekanizması yoktu. İki düzeltme yapıldı:
+
+1. **Race condition:** `delete` + `create`, artık tek bir `$transaction` içinde, atomik. Aynı token'la eşzamanlı iki istek gelirse, PostgreSQL'in row-level kilitlemesi sayesinde ikinci istek birincinin commit'ini bekler, token'ın silinmiş olduğunu görür.
+
+2. **Reuse detection:** `refreshTokens()` çağrıldığında token DB'de bulunamazsa (daha önce kullanılıp silinmiş demektir — JWT imzası zaten doğrulanmış olduğu için bu rastgele bir saldırı denemesi değil, **geçerli ama tekrar kullanılan** bir token'dır), kullanıcının **tüm** refresh token'ları iptal edilir. Bu, klasik "refresh token replay" saldırısının (token çalınıp hem saldırgan hem gerçek kullanıcı aynı token'ı kullanmaya çalışması) tespit mekanizmasıdır.
+
+**Bilinen trade-off:** Bu mekanizma, iki farklı **tarayıcı sekmesinin** (her biri kendi JS belleğinde, frontend'deki `refreshTokens()` kilidi sekmeler arası paylaşılmadığı için) aynı anda refresh denemesi yapması durumunda, nadir de olsa yanlış pozitif üretip kullanıcının tüm oturumlarını iptal edebilir. Bu, endüstri standardı bir trade-off (Auth0 dahil aynı yaklaşımı kullanır) — güvenlik kazancı, bu nadir UX maliyetine değer görülüyor.
+
+Manuel olarak curl ile uçtan uca doğrulandı: normal refresh → başarılı; eski token'ı tekrar kullanma → 401; bu noktada **yeni** (teorik olarak hâlâ geçerli olması gereken) token bile 401 dönüyor — reuse detection'ın tüm oturumları iptal ettiğinin kanıtı.
+
+### Full-text Search — Girdi Sanitization
+
+`tasks.search()`, kullanıcı girdisini `to_tsquery`'e vermeden önce sanitize eder — `& | ! ( ) : *` gibi PostgreSQL tsquery operatör karakterlerini boşlukla değiştirir. Bu olmadan, `((((` gibi bozuk sözdizimli bir girdi `to_tsquery` syntax error'ı fırlatıp 500 hatası (ve tekrarlanabilir bir küçük ölçekli DoS) üretebilirdi. `task.e2e-spec.ts`'te regresyon testleriyle korunuyor.
+
+### Bağımlılık Güvenliği
+
+`npm audit` ile düzenli kontrol ediliyor, şu an **0 bilinen zafiyet**. `js-yaml`'ın `@nestjs/swagger` altında sabitlenmiş eski bir versiyonu `npm audit fix`'in çözemediği bir durumdaydı — `package.json`'a `overrides: { "js-yaml": "^5.2.3" }` eklenerek bağımlılık ağacının tamamında zorla güncel/güvenli versiyon kullanılması sağlandı.
 
 ### In-app Bildirimler — readAt Deseni
 
-`Notification.readAt` nullable bir `DateTime` — ayrı bir `isRead: boolean` alanı **kasıtlı olarak** tutulmuyor. Sebep: iki alanı (boolean + timestamp) birbirinden bağımsız tutmak, "isRead: true ama readAt: null" gibi tutarsız durumlara yol açabilir. Tek bir nullable timestamp, hem "okundu mu?" (readAt !== null) hem "ne zaman okundu?" sorularını tek doğruluk kaynağından cevaplar. Bu desen projede tutarlı — `WorkspaceInvite.acceptedAt` de aynı mantıkla çalışıyor.
-
-`NotificationsService.markAsRead()`, sorgusunda hem `id` hem `userId`'yi birlikte filtreler (`findFirst({ where: { id, userId } })`) — bu, bir kullanıcının başka birinin bildirim ID'sini tahmin edip erişmesini (IDOR — Insecure Direct Object Reference) engeller. Bu davranış `notifications.service.spec.ts`'te özel bir testle doğrulanıyor.
+`Notification.readAt` nullable bir `DateTime` — ayrı bir `isRead: boolean` alanı **kasıtlı olarak** tutulmuyor, iki alanın senkron kalma riskini önlemek için (aynı desen `WorkspaceInvite.acceptedAt`'te de var). `NotificationsService.markAsRead()`, sorgusunda hem `id` hem `userId`'yi birlikte filtreler — bu, IDOR (Insecure Direct Object Reference) tarzı bir açığı engelliyor ve özel bir testle doğrulanıyor.
 
 ---
 
 ## Bilinen Eksikler / Notlar
 
-- **2FA devre dışı bırakma:** Şu an sadece "aktifleştir" akışı (`/auth/2fa/enable` + `/auth/2fa/verify`) var. Kullanıcı authenticator'ı kaybederse veya 2FA'yı kapatmak isterse hiçbir yolu yok. `DELETE /auth/2fa` endpoint'i eklenmesi gerekiyor — henüz yapılmadı (Faz 2.15).
-- **Mention frontend entegrasyonu:** Backend `@[isim](userId)` formatını bekliyor/üretiyor ama frontend'de bunu otomatik yazan bir mention autocomplete henüz yok. `GET /workspaces/:id/members/search` endpoint'i bu autocomplete için hazır durumda, sadece frontend UI'ı eksik.
-- **Gerçek SMTP entegrasyonu yok:** `worker/email/email.service.ts` şu an sadece log basarak email gönderimini simüle ediyor. Gerçek gönderim (nodemailer + SMTP) eklenmedi (Faz 2.16).
-- **Frontend'in Faz 2'ye hiç girmemiş olması:** Backend'de yorum, mention, aktivite akışı, WebSocket real-time senkronizasyon, in-app bildirimler tamamen çalışır durumda ama frontend'de (`taskflow-web`) bunların hiçbiri için UI yok. Bu, backend'deki ilerlemenin şu an kullanıcıya hiç görünmediği anlamına geliyor — sıradaki öncelik bu.
+- **2FA devre dışı bırakma:** `DELETE /auth/2fa` endpoint'i henüz yok (Faz 2.15).
+- **Mention frontend entegrasyonu:** Backend hazır, frontend'de mention autocomplete henüz yok.
+- **Gerçek SMTP entegrasyonu yok:** Email gönderimi şu an sadece simüle ediliyor (Faz 2.16).
+- **Frontend Faz 2'ye hiç girmedi:** Backend'de yorum, mention, aktivite akışı, WebSocket real-time senkronizasyon, in-app bildirimler tamamen çalışır durumda ama frontend'de (`taskflow-web`) bunların hiçbiri için UI yok — sıradaki öncelik bu.
+- **Pagination bilinçli olarak ertelendi:** Hiçbir listeleme endpoint'inde `skip`/`take` yok. Bu, bir güvenlik denetiminde bulundu ve **bilinçli olarak** ertelendi çünkü: (1) task listesi kanban board'u besliyor, pagination eklemek frontend'de "sonsuz kaydırma" gibi büyük bir UX değişikliği gerektirir; (2) yorum/aktivite akışı gibi gerçekten pagination'a uygun yerlerde bile, kapsamı genişletmeden önce frontend'in buna hazır olması gerekiyor. İleride ele alınacak (Faz 2.17).
+- **Kolon bazlı filtreleme yok:** Task'ları status/priority/assignee/label'a göre filtreleme (query param ile, örn. `?status=DONE&priority=HIGH`) backend'de henüz yok. Frontend roadmap'inde (Faz 3.1 — "Task filtreleme") zaten planlıydı, backend karşılığı bu README'nin Faz 3'üne eklendi (3.19).
 
 ---
 
@@ -536,16 +569,18 @@ Bu, biri çökse diğerinin etkilenmediği gerçek bir process izolasyonu sağla
 | 2.4 | RabbitMQ kurulum + genelleştirilmiş worker.queue yapısı (email/reminder/batch pattern'leri) | ✅ |
 | 2.5 | Worker uygulaması — ayrı process, `@EventPattern` handler'ları, şimdilik email (unit test edildi) | ✅ |
 | 2.6 | Email bildirimi — task atandığında (uçtan uca test edildi) | ✅ |
-| 2.7 | Email bildirimi — workspace daveti (uçtan uca test edildi) | ✅ |
+| 2.7 | Email bildirimi — workspace daveti (uçtan uca test edildi, token loglanmıyor) | ✅ |
 | 2.8 | WebSocket gateway — NestJS + Socket.io, connection-level JWT middleware auth (E2E test edildi) | ✅ |
 | 2.9 | Real-time bildirim — task CRUD + comment eklendiğinde broadcast (uçtan uca E2E test edildi) | ✅ |
 | 2.10 | In-app bildirim — listeleme, okunmamış sayısı, tekli/toplu okundu işaretleme, IDOR koruması (unit test edildi) | ✅ |
-| 2.11 | Webhook sistemi — Slack entegrasyonu | ⬜ |
-| 2.12 | Webhook sistemi — Teams entegrasyonu | ⬜ |
-| 2.13 | Redis cache — workspace/project/task hot data | ⬜ |
-| 2.14 | Cache invalidation stratejisi | ⬜ |
-| 2.15 | 2FA devre dışı bırakma endpoint'i (bkz. Bilinen Eksikler) | ⬜ |
-| 2.16 | Gerçek SMTP entegrasyonu (bkz. Bilinen Eksikler) | ⬜ |
+| 2.11 | **Güvenlik denetimi** — statik kod analizi, 4 kritik + 4 yüksek öncelikli bulgu tespit edildi ve kapatıldı (bkz. Notlar) | ✅ |
+| 2.12 | Webhook sistemi — Slack entegrasyonu | ⬜ |
+| 2.13 | Webhook sistemi — Teams entegrasyonu | ⬜ |
+| 2.14 | Redis cache — workspace/project/task hot data | ⬜ |
+| 2.15 | Cache invalidation stratejisi | ⬜ |
+| 2.16 | 2FA devre dışı bırakma endpoint'i (bkz. Bilinen Eksikler) | ⬜ |
+| 2.17 | Gerçek SMTP entegrasyonu (bkz. Bilinen Eksikler) | ⬜ |
+| 2.18 | Pagination — bilinçli olarak ertelendi, frontend UX kararı netleşince ele alınacak (bkz. Bilinen Eksikler) | ⬜ |
 
 ---
 
@@ -571,6 +606,7 @@ Bu, biri çökse diğerinin etkilenmediği gerçek bir process izolasyonu sağla
 | 3.16 | Anomali tespiti — "Bu sprint %40 yavaş" | ⬜ |
 | 3.17 | Sprint istatistikleri dashboard | ⬜ |
 | 3.18 | PDF/CSV export | ⬜ |
+| 3.19 | Task filtreleme — status/priority/assignee/label bazlı query param filtreleri (frontend Faz 3.1 ile eşleşiyor) | ⬜ |
 
 ---
 
@@ -588,9 +624,11 @@ Bu, biri çökse diğerinin etkilenmediği gerçek bir process izolasyonu sağla
 | 4.8 | GitHub Actions CI/CD — AWS'ye otomatik deploy | ⬜ |
 | 4.9 | Grafana Cloud + Loki — log monitoring | ⬜ |
 | 4.10 | Production migration stratejisi | ⬜ |
-| 4.11 | Health check endpoint | ⬜ |
-| 4.12 | E2E test coverage artırma | ⬜ |
+| 4.11 | Health check endpoint (@nestjs/terminus ile DB/Redis/RabbitMQ kontrolü) | ⬜ |
+| 4.12 | E2E test coverage artırma (controller-level testler, users modülü testleri) | ⬜ |
 | 4.13 | Performans optimizasyonu + load testing | ⬜ |
+| 4.14 | Forgot/reset password akışı | ⬜ |
+| 4.15 | RolesGuard + @Roles() decorator'ı gerçekten devreye alma (şu an ölü kod, manuel assertRole() deseni kullanılıyor) | ⬜ |
 
 ---
 
