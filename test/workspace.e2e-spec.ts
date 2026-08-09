@@ -237,6 +237,67 @@ describe('Workspaces E2E', () => {
         .expect(404);
     });
   });
+
+  describe('PATCH /workspaces/:id/members/:userId/role — OWNER koruması', () => {
+    it("ADMIN, OWNER'ın rolünü değiştirememeli (Broken Access Control fix)", async () => {
+      // Bu teste özel, izole bir workspace kur — OWNER (cookies, ana
+      // kullanıcı) + bir ADMIN kullanıcısı.
+      const wsRes = await request(app.getHttpServer())
+        .post('/api/v1/workspaces')
+        .set('Cookie', cookies)
+        .send({ name: 'Owner Protection Test', slug: 'owner-protection-test' });
+      const ownerProtectionWsId = wsRes.body.id as string;
+
+      // OWNER'ın kendi userId'sini öğren
+      const meRes = await request(app.getHttpServer())
+        .get('/api/v1/auth/me')
+        .set('Cookie', cookies);
+      const ownerUserId = meRes.body.id as string;
+
+      // İkinci kullanıcı — ADMIN olacak
+      await request(app.getHttpServer()).post('/api/v1/auth/register').send({
+        email: 'admin-attacker@test.com',
+        password: 'StrongPass123!',
+        name: 'Admin Attacker',
+      });
+
+      const adminLoginRes = await request(app.getHttpServer())
+        .post('/api/v1/auth/login')
+        .send({ email: 'admin-attacker@test.com', password: 'StrongPass123!' });
+      const adminCookies = adminLoginRes.headers[
+        'set-cookie'
+      ] as unknown as string[];
+
+      const inviteRes = await request(app.getHttpServer())
+        .post(`/api/v1/workspaces/${ownerProtectionWsId}/invite`)
+        .set('Cookie', cookies)
+        .send({ email: 'admin-attacker@test.com', role: 'ADMIN' });
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/workspaces/invite/accept/${inviteRes.body.token}`)
+        .set('Cookie', adminCookies);
+
+      // SALDIRI SENARYOSU: ADMIN, OWNER'ı MEMBER'a indirmeye çalışıyor
+      await request(app.getHttpServer())
+        .patch(
+          `/api/v1/workspaces/${ownerProtectionWsId}/members/${ownerUserId}/role`,
+        )
+        .set('Cookie', adminCookies)
+        .send({ role: 'MEMBER' })
+        .expect(403);
+
+      // Doğrulama: OWNER'ın rolü hâlâ OWNER olmalı
+      const wsDetailRes = await request(app.getHttpServer())
+        .get(`/api/v1/workspaces/${ownerProtectionWsId}`)
+        .set('Cookie', cookies);
+
+      const ownerMember = (
+        wsDetailRes.body.members as Array<{ id: string; role: string }>
+      ).find((m) => m.id === ownerUserId);
+
+      expect(ownerMember?.role).toBe('OWNER');
+    });
+  });
 });
 
 async function cleanDb(prisma: PrismaService) {
