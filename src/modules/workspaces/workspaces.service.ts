@@ -378,28 +378,41 @@ export class WorkspacesService {
     member: WorkspaceMember,
     targetUserId: string,
     dto: UpdateMemberRoleDto,
-  ): Promise<WorkspaceMemberInfo> {
+  ) {
     this.assertRole(member, [WorkspaceRole.OWNER, WorkspaceRole.ADMIN]);
 
-    // OWNER rolü sadece OWNER verebilir
+    const target = await this.prisma.workspaceMember.findUnique({
+      where: { workspaceId_userId: { workspaceId, userId: targetUserId } },
+    });
+
+    if (!target) throw new WorkspaceNotFoundException();
+
+    // GÜVENLİK: OWNER'ın rolü hiçbir şekilde başkası tarafından
+    // değiştirilemez — removeMember()'daki "OWNER çıkarılamaz" korumasıyla
+    // simetrik. Bu kontrol olmadan, bir ADMIN gerçek OWNER'ın userId'sini
+    // bulup onu sessizce MEMBER'a indirebilir ve workspace'in fiili
+    // kontrolünü ele geçirebilirdi — kurbanın kendini tekrar yükseltecek
+    // yetkisi de kalmazdı.
+    if (target.role === WorkspaceRole.OWNER) {
+      throw new WorkspaceForbiddenException();
+    }
+
+    // OWNER rolü sadece mevcut OWNER tarafından verilebilir
     if (dto.role === WorkspaceRole.OWNER) {
       this.assertRole(member, [WorkspaceRole.OWNER]);
     }
 
     const updated = await this.prisma.workspaceMember.update({
       where: { workspaceId_userId: { workspaceId, userId: targetUserId } },
-      include: { user: true },
       data: { role: dto.role },
+      include: {
+        user: {
+          select: { id: true, name: true, email: true, avatarUrl: true },
+        },
+      },
     });
 
-    return {
-      id: updated.user.id,
-      name: updated.user.name,
-      email: updated.user.email,
-      avatarUrl: updated.user.avatarUrl,
-      role: updated.role,
-      joinedAt: updated.joinedAt,
-    };
+    return updated;
   }
 
   // ─── Private Helpers ───────────────────────────────────────────────────────
