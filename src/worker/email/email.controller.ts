@@ -1,3 +1,5 @@
+// worker/email/email.controller.ts dosyasının tamamı
+
 import { Controller } from '@nestjs/common';
 import { EventPattern, Payload } from '@nestjs/microservices';
 import { EMAIL_PATTERNS } from '../../queue/rabbitmq.constants';
@@ -8,8 +10,6 @@ import type {
   WorkspaceInvitePayload,
 } from '../../queue/email-publisher.service';
 
-// @EventPattern — "fire and forget" mesajları dinler (emit() ile atılanlar).
-// Ana API'deki emit() çağrıları buraya düşer. Cevap dönmez, sadece işlenir.
 @Controller()
 export class EmailController {
   constructor(private readonly emailService: EmailService) {}
