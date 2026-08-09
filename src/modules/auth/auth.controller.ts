@@ -22,7 +22,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { AuthenticatedUser } from './types/authenticated-user.type';
 import type { JwtRefreshPayload } from './interfaces/jwt-payload.interface';
 import { AUTH_CONSTANTS } from './constants/auth.constants';
-import { LoginDto, RegisterDto, Verify2faDto } from './dto';
+import { Login2faDto, LoginDto, RegisterDto, Verify2faDto } from './dto';
 import { Throttle } from '@nestjs/throttler';
 
 const COOKIE_OPTIONS = {
@@ -76,7 +76,7 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: '2FA ile giriş yap' })
   async loginWith2fa(
-    @Body() dto: LoginDto & { code: string },
+    @Body() dto: Login2faDto,
     @Res({ passthrough: true }) res: Response,
   ) {
     const { tokens, user } = await this.authService.loginWith2fa(dto, dto.code);
