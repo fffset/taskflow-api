@@ -449,11 +449,21 @@ export class TasksService {
   async search(workspaceId: string, query: string) {
     if (!query || query.trim().length < 2) return [];
 
-    // Her kelimenin sonuna :* ekleyerek prefix search yapıyoruz.
-    // Böylece "jw" yazınca "jwt" ile başlayan her kelime eşleşir —
-    // kullanıcı tam kelimeyi yazmadan da sonuç görür.
-    const searchQuery = query
+    // Kullanıcı girdisini tsquery'e vermeden önce sanitize ediyoruz.
+    // PostgreSQL'in to_tsquery'si özel operatör karakterleri (& | ! ( ) : *)
+    // içeren girdilerde sözdizimi hatası fırlatabilir — bu hem 500 hatasına
+    // hem küçük ölçekli bir DoS'a yol açabilirdi (biri "((((" gönderip
+    // sürekli hata tetikleyebilirdi). Bu karakterleri kaldırıp sadece
+    // harf/rakam/boşluk bırakıyoruz.
+    const sanitized = query
       .trim()
+      .replace(/[&|!():*]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (sanitized.length < 2) return [];
+
+    const searchQuery = sanitized
       .split(/\s+/)
       .map((word) => `${word}:*`)
       .join(' & ');
