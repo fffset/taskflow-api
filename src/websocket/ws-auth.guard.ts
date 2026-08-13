@@ -7,6 +7,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import type { AuthenticatedSocket } from './authenticated-socket.type';
+import { extractTokenFromHandshake } from './extract-token.util';
 
 interface JwtPayload {
   sub: string;
@@ -24,7 +25,7 @@ export class WsAuthGuard implements CanActivate {
 
   canActivate(context: ExecutionContext): boolean {
     const client: AuthenticatedSocket = context.switchToWs().getClient();
-    const token = this.extractToken(client);
+    const token = extractTokenFromHandshake(client);
 
     if (!token) {
       this.logger.warn('WebSocket bağlantısı token olmadan reddedildi');
@@ -42,13 +43,5 @@ export class WsAuthGuard implements CanActivate {
       this.logger.warn('WebSocket bağlantısı geçersiz token ile reddedildi');
       return false;
     }
-  }
-
-  private extractToken(client: AuthenticatedSocket): string | undefined {
-    const authToken = client.handshake.auth?.token as string | undefined;
-    if (authToken) return authToken;
-
-    const queryToken = client.handshake.query?.token as string | undefined;
-    return queryToken;
   }
 }
