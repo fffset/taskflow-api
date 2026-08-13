@@ -16,6 +16,7 @@ import { Server, Socket } from 'socket.io';
 import { WsAuthGuard } from './ws-auth.guard';
 import type { AuthenticatedSocket } from './authenticated-socket.type';
 import { PrismaService } from '../prisma/prisma.service';
+import { AUTH_CONSTANTS } from '../modules/auth/constants/auth.constants';
 
 interface JwtPayload {
   sub: string;
@@ -24,6 +25,28 @@ interface JwtPayload {
 
 function workspaceRoom(workspaceId: string): string {
   return `workspace:${workspaceId}`;
+}
+
+// Tarayıcıdan gelen bağlantılarda access token httpOnly cookie'de tutuluyor
+// (bkz. auth.controller.ts setTokenCookies) — bu yüzden JS tarafından
+// okunamıyor ve socket.io-client'a auth.token olarak elle verilemiyor.
+// withCredentials: true ile handshake isteğine cookie otomatik ekleniyor,
+// burada da onu parse edip token'ı çıkarıyoruz. auth.token/query.token
+// (test-websocket.js'in kullandığı yöntem) öncelikli kalıyor, geriye dönük
+// uyumluluk için.
+function parseCookies(
+  cookieHeader: string | undefined,
+): Record<string, string> {
+  const cookies: Record<string, string> = {};
+  if (!cookieHeader) return cookies;
+  for (const pair of cookieHeader.split(';')) {
+    const idx = pair.indexOf('=');
+    if (idx === -1) continue;
+    const key = pair.slice(0, idx).trim();
+    const value = pair.slice(idx + 1).trim();
+    cookies[key] = decodeURIComponent(value);
+  }
+  return cookies;
 }
 
 @WebSocketGateway({
@@ -48,9 +71,11 @@ export class WorkspaceGateway
 
   afterInit(server: Server) {
     server.use((socket: AuthenticatedSocket, next) => {
+      const cookies = parseCookies(socket.handshake.headers.cookie);
       const token =
         (socket.handshake.auth?.token as string | undefined) ??
-        (socket.handshake.query?.token as string | undefined);
+        (socket.handshake.query?.token as string | undefined) ??
+        cookies[AUTH_CONSTANTS.ACCESS_TOKEN_COOKIE];
 
       if (!token) {
         return next(new Error('Unauthorized: token gerekli'));
